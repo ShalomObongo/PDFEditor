@@ -1,12 +1,71 @@
 // Dedicated PDF.js loader utility - Fixed version
 interface PDFJSLib {
-  getDocument?: (params: unknown) => { promise: Promise<unknown> };
+  getDocument: (params: { data: ArrayBuffer; disableWorker?: boolean }) => { promise: Promise<unknown> };
   version?: string;
   GlobalWorkerOptions?: { workerSrc?: string };
 }
 
+declare global {
+  interface Window {
+    pdfjsLib?: PDFJSLib;
+  }
+}
+
 let pdfJsInstance: unknown = null;
 let isLoading = false;
+let cdnScriptPromise: Promise<unknown> | null = null;
+
+// Use a widely deployed version that still exposes a global when using the non-module build.
+// (v5 packaging + Next 15 appears to trigger defineProperty issues during evaluation.)
+const PDFJS_FALLBACK_VERSION = '3.11.174';
+const UNPKG_BASE = `https://unpkg.com/pdfjs-dist@${PDFJS_FALLBACK_VERSION}/build`;
+
+const loadFromCDN = (): Promise<unknown> => {
+  if (typeof window === 'undefined') return Promise.resolve(null);
+  if (pdfJsInstance) return Promise.resolve(pdfJsInstance);
+  if (window.pdfjsLib) {
+    pdfJsInstance = window.pdfjsLib;
+    return Promise.resolve(pdfJsInstance);
+  }
+  if (cdnScriptPromise) return cdnScriptPromise;
+
+  cdnScriptPromise = new Promise((resolve, reject) => {
+    try {
+      const existing = document.querySelector('script[data-pdfjs-unpkg]');
+      if (existing) {
+        existing.addEventListener('load', () => resolve(window.pdfjsLib || null), { once: true });
+        existing.addEventListener('error', () => reject(new Error('Existing PDF.js unpkg script failed to load')), { once: true });
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = `${UNPKG_BASE}/pdf.min.js`;
+      script.async = true;
+      script.crossOrigin = 'anonymous';
+      script.setAttribute('data-pdfjs-unpkg', 'true');
+      script.onload = () => {
+        if (window.pdfjsLib && typeof window.pdfjsLib.getDocument === 'function') {
+          // Attempt to set workerSrc (optional, we still use disableWorker downstream)
+          try {
+            if (window.pdfjsLib.GlobalWorkerOptions) {
+              window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${UNPKG_BASE}/pdf.worker.min.js`;
+            }
+          } catch (e) {
+            console.warn('Failed to set workerSrc on fallback pdfjsLib:', e);
+          }
+          pdfJsInstance = window.pdfjsLib;
+          resolve(pdfJsInstance);
+        } else {
+          reject(new Error('PDF.js unpkg script loaded but pdfjsLib not found'));
+        }
+      };
+      script.onerror = () => reject(new Error('Failed to load PDF.js from unpkg CDN'));
+      document.head.appendChild(script);
+    } catch (err) {
+      reject(err);
+    }
+  });
+  return cdnScriptPromise;
+};
 
 export const loadPDFJS = async () => {
   if (typeof window === 'undefined') {
@@ -32,60 +91,23 @@ export const loadPDFJS = async () => {
   isLoading = true;
 
   try {
-    console.log('Starting PDF.js dynamic import...');
-    
-    // Use the more reliable import method that works with Next.js
-    const pdfJsModule = await import('pdfjs-dist') as { default?: PDFJSLib } & PDFJSLib;
-    console.log('PDF.js module imported successfully');
-    
-    // Get the actual PDF.js object - handle both default and named exports
-    const pdfJs = pdfJsModule.default || pdfJsModule as PDFJSLib;
-    
-    // Validate the import
-    if (!pdfJs || typeof pdfJs !== 'object') {
-      throw new Error('PDF.js import returned invalid object');
-    }
-
-    if (!pdfJs.getDocument || typeof pdfJs.getDocument !== 'function') {
-      throw new Error('PDF.js getDocument function not found');
-    }
-
-    console.log('PDF.js version:', pdfJs.version);
-
-    // NEW APPROACH: Don't set GlobalWorkerOptions.workerSrc at all
-    // Instead, let PDF.js handle the worker automatically
-    // This avoids the "Properties can only be defined on Objects" error
-    
-    // PDF.js 4.0+ can automatically detect and load the worker
-    // If we need to specify it, we do it through getDocument options instead
-    
-    console.log('PDF.js loaded and configured successfully (no worker src needed)');
-    
-    // Store the instance
-    pdfJsInstance = pdfJs;
-    
-    return pdfJsInstance;
-
-  } catch (error) {
-    console.error('Failed to load PDF.js:', error);
-    
-    // Fallback: Try the legacy import method
+    console.log('Starting PDF.js dynamic import (package attempt)...');
     try {
-      console.log('Trying fallback import method...');
-      const fallbackModule = await import('pdfjs-dist') as { default?: PDFJSLib } & PDFJSLib;
-      const fallbackPdfJs = fallbackModule.default || fallbackModule;
-      
-      if (fallbackPdfJs && typeof fallbackPdfJs.getDocument === 'function') {
-        console.log('Fallback import successful');
-        pdfJsInstance = fallbackPdfJs;
-        return pdfJsInstance;
+      const pkg: any = await import('pdfjs-dist');
+      const pdfJs: PDFJSLib = pkg.default || pkg;
+      if (!pdfJs || typeof pdfJs.getDocument !== 'function') throw new Error('Invalid pdfjs-dist package import');
+      pdfJsInstance = pdfJs;
+      console.log('PDF.js loaded from package (version:', pdfJs.version, ')');
+      return pdfJsInstance;
+    } catch (packageErr) {
+      console.warn('Package import failed; skipping legacy build (known issue) and using unpkg fallback...', packageErr);
+      const cdnLib = await loadFromCDN();
+      if (!cdnLib || typeof (cdnLib as any).getDocument !== 'function') {
+        throw new Error('Fallback pdfjsLib missing getDocument');
       }
-    } catch (fallbackError) {
-      console.error('Fallback import also failed:', fallbackError);
+      console.log('PDF.js loaded from unpkg fallback (version:', (cdnLib as any).version, ')');
+      return cdnLib;
     }
-    
-    pdfJsInstance = null;
-    return null;
   } finally {
     isLoading = false;
   }

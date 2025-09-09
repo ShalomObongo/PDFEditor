@@ -167,16 +167,24 @@ const PDFEditor: React.FC = () => {
     setFileName(file.name);
     
     try {
-      const arrayBuffer = await file.arrayBuffer();
+  const arrayBuffer = await file.arrayBuffer();
+  // Create independent copies to avoid potential buffer detachment issues across libraries
+  const pdfJsData = new Uint8Array(arrayBuffer.slice(0));
+  const pdfLibData = new Uint8Array(arrayBuffer.slice(0));
       
       // Load PDF.js with better error handling
-      const pdfjsLib = await loadPDFJS();
-      if (!pdfjsLib) {
-        throw new Error('Failed to load PDF.js library - the library could not be imported or initialized');
+      let pdfjsLib: unknown = null;
+      try {
+        pdfjsLib = await loadPDFJS();
+      } catch (e) {
+        throw new Error('Failed to load PDF.js library');
       }
-      
+      if (!pdfjsLib) {
+        throw new Error('PDF.js library instance is null');
+      }
+
       // Type assertion for PDF.js library
-      const typedPdfjsLib = pdfjsLib as { getDocument: (params: { data: ArrayBuffer }) => { promise: Promise<unknown> } };
+      const typedPdfjsLib = pdfjsLib as { getDocument: (params: { data: ArrayBuffer; disableWorker?: boolean }) => { promise: Promise<unknown> } };
       
       // Additional validation
       if (typeof typedPdfjsLib.getDocument !== 'function') {
@@ -185,7 +193,8 @@ const PDFEditor: React.FC = () => {
       
       // Load with PDF.js for rendering with defensive options
       const loadingTask = typedPdfjsLib.getDocument({
-        data: arrayBuffer,
+        data: pdfJsData as unknown as ArrayBuffer, // Cast to satisfy loose typing; pdf.js accepts TypedArray
+        disableWorker: true, // keep disabled due to dynamic/legacy fallback context
       });
       
       const loadedPdfDoc = await loadingTask.promise;
@@ -194,7 +203,7 @@ const PDFEditor: React.FC = () => {
       const typedPdfDoc = loadedPdfDoc as PDFDocumentLike;
       
       // Load with PDF-lib for editing
-      const loadedPdfLibDoc = await PDFDocument.load(arrayBuffer);
+  const loadedPdfLibDoc = await PDFDocument.load(pdfLibData);
       
       setPdfDoc(typedPdfDoc);
       setPdfLibDoc(loadedPdfLibDoc);

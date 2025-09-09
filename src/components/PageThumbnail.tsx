@@ -17,35 +17,55 @@ const PageThumbnail: React.FC<PageThumbnailProps> = ({
   onClick 
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Track current render task to avoid concurrent usage of the same canvas
+  const renderTaskRef = useRef<{ cancelled?: boolean; promise?: Promise<void> } | null>(null);
 
   useEffect(() => {
     const renderThumbnail = async () => {
       if (!pdfDoc || !canvasRef.current) return;
 
+      // If a previous render is in flight, mark it cancelled (pdf.js v3 doesn't expose cancel on the returned task in this simplified type def)
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancelled = true;
+      }
+
+      const currentTask = { cancelled: false } as { cancelled?: boolean; promise?: Promise<void> };
+      renderTaskRef.current = currentTask;
+
       try {
         const page = await (pdfDoc as PDFDocument).getPage(pageNumber) as PDFPage;
+        if (currentTask.cancelled) return;
+
         const canvas = canvasRef.current;
         const context = canvas.getContext('2d');
-        
         if (!context) return;
-        
-        // Set thumbnail size
+
         const viewport = page.getViewport({ scale: 0.2 });
         canvas.height = viewport.height;
         canvas.width = viewport.width;
-        
+
         const renderContext = {
           canvasContext: context,
           viewport: viewport
         };
-        
-        await page.render(renderContext).promise;
+
+        const task = page.render(renderContext);
+        currentTask.promise = task.promise;
+        await task.promise;
       } catch (error) {
-        console.error('Error rendering thumbnail:', error);
+        if (!(error as Error).message?.includes('cancelled')) {
+          console.error('Error rendering thumbnail:', error);
+        }
       }
     };
 
     renderThumbnail();
+
+    return () => {
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancelled = true;
+      }
+    };
   }, [pdfDoc, pageNumber]);
 
   return (
